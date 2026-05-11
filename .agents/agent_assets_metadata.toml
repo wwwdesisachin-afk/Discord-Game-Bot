@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "ZoYrzEaGqyAtkw7Oa6XgH"
+uri = "file://CRICKET_STRIKE_BOT_PROMPT.md"
+type = "text"
+title = "Cricket Strike Bot — Complete Recreation Prompt"
