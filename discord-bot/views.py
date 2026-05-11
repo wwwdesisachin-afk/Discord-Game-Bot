@@ -161,9 +161,9 @@ async def _do_innings_break(
         embed=embed,
     )
     xi_embed = build_playing_xi_embed(bat_team)
-    view = StrikerSelectView(game, channel.id)
+    view = OpenerSelectView(game, channel.id)
     await channel.send(
-        content=f"{game.batting_user.mention} — select your **Striker** to open the chase:",
+        content=f"{game.batting_user.mention} — select your **Opening Pair** (pick 2):",
         embed=xi_embed,
         view=view,
     )
@@ -287,34 +287,44 @@ class BatBowlView(discord.ui.View):
         )
         xi_embed = build_playing_xi_embed(bat_team)
         self.game.phase = "select_striker"
-        view = StrikerSelectView(self.game, self.channel_id)
+        view = OpenerSelectView(self.game, self.channel_id)
         await interaction.followup.send(
-            content=f"{self.game.batting_user.mention} — select your **Striker** (Opening Batsman):",
+            content=f"{self.game.batting_user.mention} — select your **Opening Pair** (pick 2):",
             embed=xi_embed,
             view=view,
         )
 
 
 # ---------------------------------------------------------------------------
-# Opener Selection
+# Opener Selection  (single multi-pick → striker designate)
 # ---------------------------------------------------------------------------
 
-class StrikerSelectView(discord.ui.View):
+class OpenerSelectView(discord.ui.View):
+    """Pick both openers in one dropdown (exactly 2 selections required)."""
+
     def __init__(self, game: GameState, channel_id: int):
         super().__init__(timeout=120)
         self.game = game
         self.channel_id = channel_id
 
+        eligible = [
+            p for p in game.get_batting_team()["players"]
+            if p["name"] not in game.dismissed
+        ]
         options = [
             discord.SelectOption(
                 label=f"{p['name']} (BAT:{p['bat']})",
                 value=p["name"],
                 description=f"{p['country']} | OVR:{p['ovr']}",
             )
-            for p in game.get_batting_team()["players"]
-            if p["name"] not in game.dismissed
+            for p in eligible
         ]
-        select = discord.ui.Select(placeholder="Select Striker…", options=options)
+        select = discord.ui.Select(
+            placeholder="Pick your 2 openers…",
+            min_values=2,
+            max_values=2,
+            options=options,
+        )
         select.callback = self.on_select
         self.add_item(select)
 
@@ -322,64 +332,66 @@ class StrikerSelectView(discord.ui.View):
         if interaction.user.id != self.game.batting_user_id:
             await interaction.response.send_message("Only the batting team selects!", ephemeral=True)
             return
-        chosen_name = interaction.data["values"][0]
-        player = next(p for p in self.game.get_batting_team()["players"] if p["name"] == chosen_name)
-        self.game.striker = player
-        self.game.init_batsman_stats(player)
-        self.game.phase = "select_non_striker"
+        names = interaction.data["values"]  # exactly 2
+        players = [
+            next(p for p in self.game.get_batting_team()["players"] if p["name"] == n)
+            for n in names
+        ]
+        # Store both; user will now pick which is Striker
+        self.game._pending_openers = players
+
         await interaction.response.edit_message(
-            content=f"✅ **{player['name']}** set as **Striker** 🔴",
+            content=f"✅ **{players[0]['name']}** & **{players[1]['name']}** selected — who takes strike?",
             embed=None,
-            view=None,
-        )
-        view = NonStrikerSelectView(self.game, self.channel_id)
-        await interaction.followup.send(
-            content=f"{self.game.batting_user.mention} — now select your **Non-Striker**:",
-            view=view,
+            view=StrikerDesignateView(self.game, self.channel_id, players),
         )
 
 
-class NonStrikerSelectView(discord.ui.View):
-    def __init__(self, game: GameState, channel_id: int):
+class StrikerDesignateView(discord.ui.View):
+    """Two buttons: tap the player who will face the first ball."""
+
+    def __init__(self, game: GameState, channel_id: int, players: list[dict]):
         super().__init__(timeout=120)
         self.game = game
         self.channel_id = channel_id
 
-        options = [
-            discord.SelectOption(
-                label=f"{p['name']} (BAT:{p['bat']})",
-                value=p["name"],
-                description=f"{p['country']} | OVR:{p['ovr']}",
+        for p in players:
+            btn = discord.ui.Button(
+                label=f"🔴 {p['name']}",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"striker_{p['name']}",
             )
-            for p in game.get_batting_team()["players"]
-            if p["name"] not in game.dismissed
-            and (game.striker is None or p["name"] != game.striker["name"])
-        ]
-        select = discord.ui.Select(placeholder="Select Non-Striker…", options=options)
-        select.callback = self.on_select
-        self.add_item(select)
+            btn.callback = self._make_cb(p, players)
+            self.add_item(btn)
 
-    async def on_select(self, interaction: discord.Interaction):
-        if interaction.user.id != self.game.batting_user_id:
-            await interaction.response.send_message("Only the batting team selects!", ephemeral=True)
-            return
-        chosen_name = interaction.data["values"][0]
-        player = next(p for p in self.game.get_batting_team()["players"] if p["name"] == chosen_name)
-        self.game.non_striker = player
-        self.game.init_batsman_stats(player)
-        await interaction.response.edit_message(
-            content=f"✅ **{player['name']}** set as **Non-Striker**",
-            view=None,
-        )
-        bowl_team = self.game.get_bowling_team()
-        xi_embed = build_playing_xi_embed(bowl_team)
-        self.game.phase = "select_bowler"
-        view = BowlerSelectView(self.game, self.channel_id, self.game.get_available_bowlers())
-        await interaction.followup.send(
-            content=f"{self.game.bowling_user.mention} — select your **Opening Bowler**:",
-            embed=xi_embed,
-            view=view,
-        )
+    def _make_cb(self, striker: dict, players: list[dict]):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.game.batting_user_id:
+                await interaction.response.send_message("Only the batting team selects!", ephemeral=True)
+                return
+            non_striker = next(p for p in players if p["name"] != striker["name"])
+            self.game.striker = striker
+            self.game.non_striker = non_striker
+            self.game.init_batsman_stats(striker)
+            self.game.init_batsman_stats(non_striker)
+            self.game.phase = "select_bowler"
+
+            await interaction.response.edit_message(
+                content=(
+                    f"🔴 **{striker['name']}** on strike  ·  "
+                    f"**{non_striker['name']}** at non-striker end"
+                ),
+                view=None,
+            )
+            bowl_team = self.game.get_bowling_team()
+            xi_embed = build_playing_xi_embed(bowl_team)
+            view = BowlerSelectView(self.game, self.channel_id, self.game.get_available_bowlers())
+            await interaction.followup.send(
+                content=f"{self.game.bowling_user.mention} — select your **Opening Bowler**:",
+                embed=xi_embed,
+                view=view,
+            )
+        return callback
 
 
 # ---------------------------------------------------------------------------
