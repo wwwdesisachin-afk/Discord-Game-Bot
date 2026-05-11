@@ -23,6 +23,17 @@ def _timeline_emoji(outcome: str) -> str:
     return TIMELINE_EMOJIS.get(outcome, "•")
 
 
+async def _send_bowling_prompt(channel: discord.TextChannel, game: GameState):
+    """Send a new message with bowling buttons."""
+    embed = build_scoreboard_embed(game)
+    view = BowlingView(game, channel.id)
+    await channel.send(
+        content=f"🎯 {game.bowling_user.mention} — choose your delivery:",
+        embed=embed,
+        view=view,
+    )
+
+
 async def _process_delivery(interaction: discord.Interaction, game: GameState, shot: str):
     delivery = game.pending_delivery
     bowler = game.current_bowler
@@ -43,6 +54,7 @@ async def _process_delivery(interaction: discord.Interaction, game: GameState, s
         outcome,
     )
 
+    # Update game state
     if outcome == "W":
         game.add_legal_ball()
         game.add_wicket()
@@ -67,74 +79,94 @@ async def _process_delivery(interaction: discord.Interaction, game: GameState, s
         if runs in (1, 3):
             game.rotate_strike()
 
+    # Remove batting buttons from the clicked message
+    await interaction.response.edit_message(view=None)
+
+    channel = interaction.channel
     embed = build_scoreboard_embed(game)
 
+    # ── Match / innings over ──────────────────────────────────────────────
     if game.is_innings_over():
         if game.innings == 1:
-            await _start_second_innings(interaction, game, commentary, embed)
+            await _do_innings_break(channel, game, commentary, embed)
             return
         else:
-            result_embed = build_result_embed(game)
             active_games.pop(interaction.channel_id, None)
-            await interaction.response.edit_message(content=commentary, embed=result_embed, view=None)
+            result_embed = build_result_embed(game)
+            await channel.send(content=commentary, embed=result_embed)
             return
 
+    # ── Wicket ────────────────────────────────────────────────────────────
     if outcome == "W":
         available = game.get_available_batsmen()
         if not available:
             if game.innings == 1:
-                await _start_second_innings(interaction, game, commentary, embed)
+                await _do_innings_break(channel, game, commentary, embed)
             else:
-                result_embed = build_result_embed(game)
                 active_games.pop(interaction.channel_id, None)
-                await interaction.response.edit_message(content=commentary, embed=result_embed, view=None)
+                result_embed = build_result_embed(game)
+                await channel.send(content=commentary, embed=result_embed)
             return
         game.phase = "wicket_fallen"
-        view = NextBatsmanView(game, interaction.channel_id)
-        await interaction.response.edit_message(content=commentary, embed=embed, view=view)
-        return
-
-    if not is_extra and game.current_over_balls >= 6:
-        game.end_over()
-        if game.current_legal_balls >= game.overs * 6:
-            if game.innings == 1:
-                await _start_second_innings(interaction, game, commentary, embed)
-            else:
-                result_embed = build_result_embed(game)
-                active_games.pop(interaction.channel_id, None)
-                await interaction.response.edit_message(content=commentary, embed=result_embed, view=None)
-            return
-        game.phase = "over_end"
-        available = game.get_available_bowlers()
-        view = NextBowlerView(game, interaction.channel_id, available)
-        over_num = game.current_legal_balls // 6
-        await interaction.response.edit_message(
-            content=commentary + f"\n\n**End of over {over_num}.** {game.bowling_user.mention} — select your next bowler.",
+        view = NextBatsmanView(game, channel.id)
+        await channel.send(
+            content=commentary + f"\n\n🪦 **Wicket!** {game.batting_user.mention} — select your next batsman:",
             embed=embed,
             view=view,
         )
         return
 
+    # ── Over end ──────────────────────────────────────────────────────────
+    if not is_extra and game.current_over_balls >= 6:
+        over_num = game.current_legal_balls // 6
+        game.end_over()
+
+        if game.is_innings_over():
+            if game.innings == 1:
+                await _do_innings_break(channel, game, commentary, embed)
+            else:
+                active_games.pop(interaction.channel_id, None)
+                result_embed = build_result_embed(game)
+                await channel.send(content=commentary, embed=result_embed)
+            return
+
+        game.phase = "over_end"
+        available = game.get_available_bowlers()
+        view = NextBowlerView(game, channel.id, available)
+        await channel.send(
+            content=commentary + f"\n\n**🔄 End of over {over_num}!** {game.bowling_user.mention} — select your next bowler:",
+            embed=embed,
+            view=view,
+        )
+        return
+
+    # ── Continue: send new bowling prompt ─────────────────────────────────
+    await channel.send(content=commentary, embed=embed)
     game.phase = "bowl_select"
-    view = BowlingView(game, interaction.channel_id)
-    prompt = f"{game.bowling_user.mention} — choose your delivery:"
-    await interaction.response.edit_message(content=commentary + f"\n\n{prompt}", embed=embed, view=view)
+    await _send_bowling_prompt(channel, game)
 
 
-async def _start_second_innings(
-    interaction: discord.Interaction, game: GameState, commentary: str, embed: discord.Embed
+async def _do_innings_break(
+    channel: discord.TextChannel, game: GameState, commentary: str, embed: discord.Embed
 ):
     game.start_second_innings()
     bat_team = game.get_batting_team()
     target = game.target()
-    msg = (
-        commentary
-        + f"\n\n**End of 1st Innings!** {bat_team['name']} chasing **{target}** in {game.overs} overs.\n"
-        + f"{game.batting_user.mention} — select your opening pair."
+    await channel.send(
+        content=(
+            commentary
+            + f"\n\n**⏸ End of 1st Innings!**\n"
+            + f"🎯 **{bat_team['name']}** need **{target}** runs to win in {game.overs} overs."
+        ),
+        embed=embed,
     )
     xi_embed = build_playing_xi_embed(bat_team)
-    view = StrikerSelectView(game, interaction.channel_id)
-    await interaction.response.edit_message(content=msg, embed=xi_embed, view=view)
+    view = StrikerSelectView(game, channel.id)
+    await channel.send(
+        content=f"{game.batting_user.mention} — select your **Striker** to open the chase:",
+        embed=xi_embed,
+        view=view,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -153,11 +185,12 @@ class AcceptDeclineView(discord.ui.View):
             await interaction.response.send_message("This challenge isn't for you!", ephemeral=True)
             return
         self.game.phase = "toss"
+        await interaction.response.edit_message(view=None)
         view = TossView(self.game, self.channel_id)
-        await interaction.response.edit_message(
+        await interaction.followup.send(
             content=(
                 f"✅ **{self.game.opponent.display_name}** accepted the challenge!\n\n"
-                f"**Toss time!** {self.game.challenger.mention} — call it:"
+                f"🪙 **Toss time!** {self.game.challenger.mention} — call it:"
             ),
             view=view,
         )
@@ -200,13 +233,16 @@ class TossView(discord.ui.View):
         winner = self.game.challenger if won else self.game.opponent
         self.game.toss_winner_id = winner.id
         self.game.phase = "bat_or_bowl"
-        view = BatBowlView(self.game, self.channel_id)
         await interaction.response.edit_message(
             content=(
                 f"{TOSS_HEAD_EMOJI if result == 'Head' else TOSS_TAIL_EMOJI} "
-                f"**{result}!** — {winner.mention} wins the toss!\n\n"
-                f"{winner.mention} — do you want to **Bat** or **Bowl**?"
+                f"**{result}!** — **{winner.display_name}** wins the toss!"
             ),
+            view=None,
+        )
+        view = BatBowlView(self.game, self.channel_id)
+        await interaction.followup.send(
+            content=f"{winner.mention} — do you want to **Bat** or **Bowl**?",
             view=view,
         )
 
@@ -242,16 +278,18 @@ class BatBowlView(discord.ui.View):
             self.game.bowling_user_id = winner_id
             self.game.batting_user_id = loser_id
 
-        bat_team = self.game.get_batting_team()
         choice_txt = "bat" if bat_first else "bowl"
+        bat_team = self.game.get_batting_team()
+
+        await interaction.response.edit_message(
+            content=f"**{interaction.user.display_name}** elected to **{choice_txt}** first!",
+            view=None,
+        )
         xi_embed = build_playing_xi_embed(bat_team)
         self.game.phase = "select_striker"
         view = StrikerSelectView(self.game, self.channel_id)
-        await interaction.response.edit_message(
-            content=(
-                f"**{interaction.user.display_name}** chose to **{choice_txt}**!\n\n"
-                f"{self.game.batting_user.mention} — select your **Striker** (Opening Batsman):"
-            ),
+        await interaction.followup.send(
+            content=f"{self.game.batting_user.mention} — select your **Striker** (Opening Batsman):",
             embed=xi_embed,
             view=view,
         )
@@ -276,11 +314,7 @@ class StrikerSelectView(discord.ui.View):
             for p in game.get_batting_team()["players"]
             if p["name"] not in game.dismissed
         ]
-        select = discord.ui.Select(
-            placeholder="Select Striker…",
-            options=options,
-            custom_id="striker_select",
-        )
+        select = discord.ui.Select(placeholder="Select Striker…", options=options)
         select.callback = self.on_select
         self.add_item(select)
 
@@ -293,12 +327,14 @@ class StrikerSelectView(discord.ui.View):
         self.game.striker = player
         self.game.init_batsman_stats(player)
         self.game.phase = "select_non_striker"
-        view = NonStrikerSelectView(self.game, self.channel_id)
         await interaction.response.edit_message(
-            content=(
-                f"✅ **{player['name']}** set as Striker.\n"
-                f"{self.game.batting_user.mention} — now select your **Non-Striker**:"
-            ),
+            content=f"✅ **{player['name']}** set as **Striker** 🔴",
+            embed=None,
+            view=None,
+        )
+        view = NonStrikerSelectView(self.game, self.channel_id)
+        await interaction.followup.send(
+            content=f"{self.game.batting_user.mention} — now select your **Non-Striker**:",
             view=view,
         )
 
@@ -319,11 +355,7 @@ class NonStrikerSelectView(discord.ui.View):
             if p["name"] not in game.dismissed
             and (game.striker is None or p["name"] != game.striker["name"])
         ]
-        select = discord.ui.Select(
-            placeholder="Select Non-Striker…",
-            options=options,
-            custom_id="non_striker_select",
-        )
+        select = discord.ui.Select(placeholder="Select Non-Striker…", options=options)
         select.callback = self.on_select
         self.add_item(select)
 
@@ -335,16 +367,16 @@ class NonStrikerSelectView(discord.ui.View):
         player = next(p for p in self.game.get_batting_team()["players"] if p["name"] == chosen_name)
         self.game.non_striker = player
         self.game.init_batsman_stats(player)
-
+        await interaction.response.edit_message(
+            content=f"✅ **{player['name']}** set as **Non-Striker**",
+            view=None,
+        )
         bowl_team = self.game.get_bowling_team()
         xi_embed = build_playing_xi_embed(bowl_team)
         self.game.phase = "select_bowler"
         view = BowlerSelectView(self.game, self.channel_id, self.game.get_available_bowlers())
-        await interaction.response.edit_message(
-            content=(
-                f"✅ **{player['name']}** set as Non-Striker.\n"
-                f"{self.game.bowling_user.mention} — select your **Opening Bowler**:"
-            ),
+        await interaction.followup.send(
+            content=f"{self.game.bowling_user.mention} — select your **Opening Bowler**:",
             embed=xi_embed,
             view=view,
         )
@@ -367,15 +399,9 @@ class BowlerSelectView(discord.ui.View):
                 description=f"{p['country']} | OVR:{p['ovr']} | {p['bowling_type']}",
             )
             for p in available
-        ]
-        if not options:
-            options = [discord.SelectOption(label="No bowlers available", value="none")]
+        ] or [discord.SelectOption(label="No eligible bowlers", value="none")]
 
-        select = discord.ui.Select(
-            placeholder="Select Bowler…",
-            options=options,
-            custom_id="bowler_select",
-        )
+        select = discord.ui.Select(placeholder="Select Bowler…", options=options)
         select.callback = self.on_select
         self.add_item(select)
 
@@ -385,19 +411,21 @@ class BowlerSelectView(discord.ui.View):
             return
         chosen_name = interaction.data["values"][0]
         if chosen_name == "none":
-            await interaction.response.send_message("No bowlers available!", ephemeral=True)
+            await interaction.response.send_message("No eligible bowlers!", ephemeral=True)
             return
         player = next(p for p in self.game.get_bowling_team()["players"] if p["name"] == chosen_name)
         self.game.current_bowler = player
         self.game.init_bowler_stats(player)
         self.game.phase = "bowl_select"
+        await interaction.response.edit_message(
+            content=f"🎯 **{player['name']}** will bowl.",
+            embed=None,
+            view=None,
+        )
         embed = build_scoreboard_embed(self.game)
         view = BowlingView(self.game, self.channel_id)
-        await interaction.response.edit_message(
-            content=(
-                f"🎯 **{player['name']}** will bowl.\n"
-                f"{self.game.bowling_user.mention} — choose your delivery:"
-            ),
+        await interaction.followup.send(
+            content=f"{self.game.bowling_user.mention} — choose your delivery:",
             embed=embed,
             view=view,
         )
@@ -432,14 +460,21 @@ class BowlingView(discord.ui.View):
                 return
             self.game.pending_delivery = delivery
             self.game.phase = "bat_select"
-            embed = build_scoreboard_embed(self.game)
-            view = BattingView(self.game, self.channel_id)
+
+            # Remove bowling buttons, confirm delivery
             await interaction.response.edit_message(
                 content=(
-                    f"🎯 **{self.game.current_bowler['name']}** bowls a **{delivery}**!\n"
-                    f"{self.game.batting_user.mention} — play your shot:"
+                    f"🎯 **{self.game.current_bowler['name']}** "
+                    f"({self.game.current_bowler['ovr']}) comes into the attack\n"
+                    f"**{self.game.current_bowler['name']}** : **{delivery}**"
                 ),
-                embed=embed,
+                embed=None,
+                view=None,
+            )
+            # Send batting prompt as new message
+            view = BattingView(self.game, self.channel_id)
+            await interaction.followup.send(
+                content=f"🏏 {self.game.batting_user.mention} — **{self.game.striker['name']}**, play your shot:",
                 view=view,
             )
         return callback
@@ -493,20 +528,15 @@ class NextBatsmanView(discord.ui.View):
         self.game = game
         self.channel_id = channel_id
 
-        available = game.get_available_batsmen()
         options = [
             discord.SelectOption(
                 label=f"{p['name']} (BAT:{p['bat']})",
                 value=p["name"],
                 description=f"{p['country']} | OVR:{p['ovr']}",
             )
-            for p in available
+            for p in game.get_available_batsmen()
         ]
-        select = discord.ui.Select(
-            placeholder="Select next Batsman…",
-            options=options,
-            custom_id="next_bat_select",
-        )
+        select = discord.ui.Select(placeholder="Select next Batsman…", options=options)
         select.callback = self.on_select
         self.add_item(select)
 
@@ -520,30 +550,25 @@ class NextBatsmanView(discord.ui.View):
         self.game.init_batsman_stats(player)
         self.game.phase = "bowl_select"
 
+        await interaction.response.edit_message(
+            content=f"🏏 **{player['name']}** comes in to bat at #{self.game.current_wickets + 1}.",
+            embed=None,
+            view=None,
+        )
+
+        channel = interaction.channel
         if self.game.current_over_balls >= 6:
             self.game.end_over()
-            available_bowlers = self.game.get_available_bowlers()
-            bowl_view = NextBowlerView(self.game, self.channel_id, available_bowlers)
+            available = self.game.get_available_bowlers()
+            view = NextBowlerView(self.game, self.channel_id, available)
             embed = build_scoreboard_embed(self.game)
-            await interaction.response.edit_message(
-                content=(
-                    f"✅ **{player['name']}** comes in to bat.\n"
-                    f"**End of over.** {self.game.bowling_user.mention} — select your next bowler:"
-                ),
-                embed=embed,
-                view=bowl_view,
-            )
-        else:
-            embed = build_scoreboard_embed(self.game)
-            view = BowlingView(self.game, self.channel_id)
-            await interaction.response.edit_message(
-                content=(
-                    f"✅ **{player['name']}** comes in at #{self.game.current_wickets + 1}.\n"
-                    f"{self.game.bowling_user.mention} — choose your delivery:"
-                ),
+            await channel.send(
+                content=f"**🔄 End of over!** {self.game.bowling_user.mention} — select your next bowler:",
                 embed=embed,
                 view=view,
             )
+        else:
+            await _send_bowling_prompt(channel, self.game)
 
 
 # ---------------------------------------------------------------------------
@@ -560,22 +585,16 @@ class NextBowlerView(discord.ui.View):
             discord.SelectOption(
                 label=f"{p['name']} (BOWL:{p['bowl']})",
                 value=p["name"],
-                description=f"{p['bowling_type']} | {self.game.bowler_overs_str(p['name'])} ov bowled",
+                description=f"{p['bowling_type']} | {self._ov(p['name'])} ov bowled",
             )
             for p in available
-        ]
-        if not options:
-            options = [discord.SelectOption(label="No eligible bowlers", value="none")]
+        ] or [discord.SelectOption(label="No eligible bowlers", value="none")]
 
-        select = discord.ui.Select(
-            placeholder="Select next Bowler…",
-            options=options,
-            custom_id="next_bowl_select",
-        )
+        select = discord.ui.Select(placeholder="Select next Bowler…", options=options)
         select.callback = self.on_select
         self.add_item(select)
 
-    def bowler_overs_str(self, name: str) -> str:
+    def _ov(self, name: str) -> str:
         balls = self.game.bowler_ball_count.get(name, 0)
         return f"{balls // 6}.{balls % 6}"
 
@@ -591,13 +610,10 @@ class NextBowlerView(discord.ui.View):
         self.game.current_bowler = player
         self.game.init_bowler_stats(player)
         self.game.phase = "bowl_select"
-        embed = build_scoreboard_embed(self.game)
-        view = BowlingView(self.game, self.channel_id)
+
         await interaction.response.edit_message(
-            content=(
-                f"🎯 **{player['name']}** starts a new over.\n"
-                f"{self.game.bowling_user.mention} — choose your delivery:"
-            ),
-            embed=embed,
-            view=view,
+            content=f"🎯 **{player['name']}** starts a new over.",
+            embed=None,
+            view=None,
         )
+        await _send_bowling_prompt(interaction.channel, self.game)
