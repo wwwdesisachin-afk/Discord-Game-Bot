@@ -10,6 +10,7 @@ from game import GameState
 from views import active_games, AcceptDeclineView
 from embeds import build_playing_xi_embed
 from data import SAMPLE_TEAMS
+from emoji_sync import sync_emojis
 
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 
@@ -40,6 +41,7 @@ def assign_teams(challenger: discord.Member, opponent: discord.Member):
 async def on_ready():
     print(f"[CricketBot] Logged in as {bot.user} ({bot.user.id})")
     print(f"[CricketBot] Ready! Use !cs start @user <overs>")
+    await sync_emojis(bot)
 
 
 @bot.group(name="cs", invoke_without_command=True)
