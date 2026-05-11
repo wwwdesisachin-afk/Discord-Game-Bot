@@ -45,13 +45,14 @@ async def _process_delivery(interaction: discord.Interaction, game: GameState, s
     )
 
     speed_range = BALL_SPEEDS.get(delivery, (100, 130))
-    speed = random.randint(*speed_range)
+    speed = random.uniform(*speed_range)
 
     commentary = build_ball_commentary(
         bowler["name"], bowler["ovr"],
         delivery, speed,
         striker["name"], shot,
         outcome,
+        bowling_type=bowler.get("bowling_type"),
     )
 
     # Update game state
@@ -152,14 +153,20 @@ async def _do_innings_break(
     game.start_second_innings()
     bat_team = game.get_batting_team()
     target = game.target()
+    balls_in_match = game.overs * 6
+    rrr_val = round((target / balls_in_match) * 6, 1) if balls_in_match > 0 else 0.0
+
+    # End of innings scoreboard
+    await channel.send(content=commentary, embed=embed)
+
+    # Bold announcement banner
     await channel.send(
         content=(
-            commentary
-            + f"\n\n**⏸ End of 1st Innings!**\n"
-            + f"🎯 **{bat_team['name']}** need **{target}** runs to win in {game.overs} overs."
-        ),
-        embed=embed,
+            f"**⏸ Innings Break!**\n"
+            f"**{bat_team['name'].upper()} REQUIRE {target} RUNS OFF {balls_in_match} BALLS (RRR: {rrr_val})**"
+        )
     )
+
     xi_embed = build_playing_xi_embed(bat_team)
     view = OpenerSelectView(game, channel.id)
     await channel.send(
@@ -383,6 +390,13 @@ class StrikerDesignateView(discord.ui.View):
                 ),
                 view=None,
             )
+            # Opening pair announcement
+            await interaction.followup.send(
+                content=(
+                    f"**{striker['name']}** ({striker['ovr']}) and "
+                    f"**{non_striker['name']}** ({non_striker['ovr']}) are opening the batting"
+                )
+            )
             bowl_team = self.game.get_bowling_team()
             xi_embed = build_playing_xi_embed(bowl_team)
             view = BowlerSelectView(self.game, self.channel_id, self.game.get_available_bowlers())
@@ -434,6 +448,10 @@ class BowlerSelectView(discord.ui.View):
             embed=None,
             view=None,
         )
+        # "Comes into the attack" announcement
+        await interaction.followup.send(
+            content=f"**{player['name']}** ({player['ovr']}) comes into the attack"
+        )
         embed = build_scoreboard_embed(self.game)
         view = BowlingView(self.game, self.channel_id)
         await interaction.followup.send(
@@ -473,13 +491,9 @@ class BowlingView(discord.ui.View):
             self.game.pending_delivery = delivery
             self.game.phase = "bat_select"
 
-            # Remove bowling buttons, confirm delivery
+            # Remove bowling buttons, confirm delivery chosen
             await interaction.response.edit_message(
-                content=(
-                    f"🎯 **{self.game.current_bowler['name']}** "
-                    f"({self.game.current_bowler['ovr']}) comes into the attack\n"
-                    f"**{self.game.current_bowler['name']}** : **{delivery}**"
-                ),
+                content=f"**{self.game.current_bowler['name']}** : **{delivery}**",
                 embed=None,
                 view=None,
             )
@@ -563,9 +577,13 @@ class NextBatsmanView(discord.ui.View):
         self.game.phase = "bowl_select"
 
         await interaction.response.edit_message(
-            content=f"🏏 **{player['name']}** comes in to bat at #{self.game.current_wickets + 1}.",
+            content=f"🏏 **{player['name']}** selected.",
             embed=None,
             view=None,
+        )
+        # "Comes to the crease" announcement
+        await interaction.followup.send(
+            content=f"**{player['name']}** ({player['ovr']}) comes to the crease"
         )
 
         channel = interaction.channel
@@ -627,5 +645,8 @@ class NextBowlerView(discord.ui.View):
             content=f"🎯 **{player['name']}** starts a new over.",
             embed=None,
             view=None,
+        )
+        await interaction.followup.send(
+            content=f"**{player['name']}** ({player['ovr']}) comes into the attack"
         )
         await _send_bowling_prompt(interaction.channel, self.game)
